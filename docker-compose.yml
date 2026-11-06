@@ -1,78 +1,140 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md#写插件。
+# RomM：复古游戏库。扫描 games 共享文件夹里的 ROM，浏览器里用 EmulatorJS 直接玩。
+#
+# 登录全走核心的 OIDC： RomM 官方支持 OIDC（authlib 发现文档 + 授权码 + PKCE），核心的身份
+# 提供方是 http，RomM 对此没有强制（源码和它自己的测试都用 http 的 issuer，docs 里
+# "HTTPS is required" 指的是第三方 IdP 常见要求）。DISABLE_SETUP_WIZARD 关掉首次的本地
+# 管理员向导，groups 声明把主人（["owner"]）映射成 RomM 管理员，打开网页就进应用。
+# RomM 首次登录要求 ID 令牌里有 email，主人没填邮箱装不上（${WONTON_OWNER_EMAIL:?}）。
+#
+# Redis 用镜像内置的 valkey（上游文档的默认做法）：不设 REDIS_HOST 时由入口脚本自己拉起，
+# 数据落在挂载的 /redis-data。元数据提供方（IGDB 等）要用户自己的密钥，底座还没有让用户
+# 自填密钥的渠道，v0.1 一个都不配：扫描、整理、游玩照常，见 README。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.7-alpine@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d
+  romm:
+    image: rommapp/romm:5.4.1@sha256:8677fb7b81b1d3db20b849e989a1dadc2a11159e51eb34a2acdcb01102274edf
+    # 镜像里 /romm 归 uid 1000；整个容器以 PUID 运行，nginx/valkey/gunicorn 都跟着降权。
+    user: "${PUID}:${PGID}"
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      TZ: ${TZ}
+      # MariaDB（上游文档的推荐驱动）
+      ROMM_DB_DRIVER: mariadb
+      DB_HOST: db
+      DB_NAME: romm
+      DB_USER: romm
+      DB_PASSWD: ${WONTON_SECRET_DB_PASSWORD}
+      # 会话签名密钥：不写的话每次启动随机生成，重启后所有会话失效。
+      ROMM_AUTH_SECRET_KEY: ${WONTON_SECRET_AUTH_KEY}
+      # OIDC：发现文档直接给全地址，避免依赖 authlib 的 URL 拼法。
+      OIDC_ENABLED: "true"
+      OIDC_AUTOLOGIN: "true"
+      OIDC_PROVIDER: Wonton
+      OIDC_CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
+      OIDC_REDIRECT_URI: ${WONTON_APP_URL}/api/oauth/openid
+      OIDC_SERVER_METADATA_URL: ${WONTON_OIDC_ISSUER}/.well-known/openid-configuration
+      # 核心的 groups 声明恒为 ["owner"]（见云吞规范）：主人进来自动建成管理员。
+      OIDC_CLAIM_ROLES: groups
+      OIDC_ROLE_ADMIN: owner
+      OIDC_ROLE_VIEWER: owner
+      # 首次打开跳过本地管理员向导，直接由 OIDC 建号（账号是主人自己，角色是管理员）。
+      DISABLE_SETUP_WIZARD: "true"
+      # RomM 首次 OIDC 登录硬性要求 email 声明（源码里缺了直接 400）。
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?需要用户邮箱}
+    volumes:
+      # 游戏库：共享文件夹按平台子文件夹组织（如 games/gba/）；RomM 在这里建目录和收上传。
+      - ${WONTON_SHARE_GAMES}:/romm/library
+      - ${WONTON_APP_DATA}/assets:/romm/assets
+      - ${WONTON_APP_DATA}/resources:/romm/resources
+      - ${WONTON_APP_DATA}/config:/romm/config
+      # 内置 valkey 的快照目录，不挂的话重建容器就丢队列和会话。
+      - ${WONTON_APP_DATA}/redis:/redis-data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # /api/heartbeat 不需要登录，后端会查一遍数据库和缓存：200 就是整条链真的可用。
+      # busybox wget 不读 no_proxy，加 -Y off 防止宿主代理拦内部地址。
+      test: ["CMD-SHELL", "wget -q -Y off -O /dev/null http://127.0.0.1:8080/api/heartbeat"]
       interval: 30s
-      timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+      start_interval: 5s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  db:
+    image: mariadb:11.8.9@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
+    environment:
+      MARIADB_ROOT_PASSWORD: ${WONTON_SECRET_DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: romm
+      MARIADB_USER: romm
+      MARIADB_PASSWORD: ${WONTON_SECRET_DB_PASSWORD}
+    volumes:
+      - ${WONTON_APP_DATA}/db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+      start_interval: 5s
 
 x-wonton:
   spec: "0.5"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  id: app.romm.romm
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { en: RomM }
+  description:
+    zh: 把游戏 ROM 整理成网页游戏库，在浏览器里直接玩
+    en: Organize your game ROMs into a web library and play them in the browser
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/library.png, screenshots/game.png, screenshots/search.png, screenshots/play.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://romm.app
+  license: AGPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [游戏, 模拟器, 复古游戏]
+    en: [Games, Emulators, Retro games]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      把游戏 ROM 整理成网页游戏库：扫描、检索、看封面和介绍，点开就在浏览器里玩（EmulatorJS、js-dos、Ruffle 等模拟器内置），存档和即时存档跟着账号走。
+
+      游戏文件放在共享文件夹 games 里，按上游 5.x 的库结构放 roms 子目录再按平台分（如 games/roms/gba/ 放 GBA 的 ROM，支持的平台见 RomM 文档）；也可以直接在网页里上传。
+
+      登录用云吞的账号，打开就进库，不用再注册或设密码。
+
+      封面和介绍等元数据依赖 IGDB 一类的外部服务，需要用户自己的 API 密钥；本版本不预填密钥，扫描和游玩不依赖元数据。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Turn your game ROMs into a web library: scan, search, browse covers and descriptions, and play right in the browser (EmulatorJS, js-dos, Ruffle and more are built in). Saves and states follow your account.
+
+      ROM files live in the games shared folder, in a roms folder grouped by platform (e.g. games/roms/gba/ for GBA; supported platforms are listed in the RomM docs). You can also upload from the web UI.
+
+      Sign-in uses your Wonton account; the library opens straight away, with no second sign-up or password.
+
+      Metadata (covers, descriptions) comes from external services such as IGDB and requires your own API keys. This release ships without keys; scanning and playing work without metadata.
+  release_notes: { zh: 第一个版本。, en: First release. }
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放到底栏的页面，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#底栏页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：页面夹在 App 的栏中间，不会被挡。
-      # 想让内容从栏下滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出栏的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: romm
+    port: 8080
+    sso: oidc
+    oidc:
+      redirect_paths: [/api/oauth/openid]
+  secrets:
+    db_password:
+      generate: { bytes: 32 }
+    db_root_password:
+      generate: { bytes: 32 }
+    auth_key:
+      generate: { bytes: 32 }
+  permissions:
+    # 元数据提供方（IGDB、ScreenScraper、SteamGridDB 等）和它们的令牌服务在公网。
+    - network.egress
+    # RomM 在 games 共享文件夹里建平台目录、收网页上传。
+    - storage.share.games:write
+    # 注入主人的邮箱：RomM 的 OIDC 登录要求 ID 令牌带 email。
+    - owner.identity
+  # 上游没写最低内存。单容器实测（5.4.1，空库扫描后空闲）：romm 约 654M + mariadb 约 42M，取 1G。镜像有 amd64 和 arm64。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 1G
