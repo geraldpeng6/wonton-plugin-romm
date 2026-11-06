@@ -36,7 +36,12 @@ data_write() { # 在 games 共享文件夹建 gba 平台目录放一个占位 RO
   head -c 4096 /dev/urandom >"$(games_share)/roms/gba/wonton-$marker.gba" || { echo "写占位 ROM 失败"; return 1; }
 
   identity_check >/dev/null || { echo "OIDC 链走不通"; return 1; }
-  task="$(web_get /api/users/me >/dev/null; curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" \
+  # RomM 的 CSRF 中间件校验 POST：登录后先刷新令牌 cookie 再带上它。
+  web_get /api/heartbeat >/dev/null 2>&1
+  local csrf
+  csrf="$(awk '$6 == "romm_csrftoken" {print $7}' "$SMOKE_JAR" | tail -1)"
+  [[ -n "$csrf" ]] || { echo "会话里没有 romm_csrftoken"; return 1; }
+  task="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -H "x-csrftoken: $csrf" \
     -X POST "$SMOKE_WEB_URL/api/tasks/scan")" || { echo "触发扫描失败：$(head -c 200 <<<"$task")"; return 1; }
   task_id="$(jq -r '.task_id // empty' <<<"$task")"
   [[ -n "$task_id" ]] || { echo "扫描响应没有 task_id：$(head -c 200 <<<"$task")"; return 1; }
