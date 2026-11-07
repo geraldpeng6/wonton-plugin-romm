@@ -100,7 +100,8 @@ data_write() { # 用应用的上传接口收一个占位 ROM（服务端自己�
 
 data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重扫）
   local jar marker
-  jar="$(mktemp)"
+  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  jar="$(mktemp -u)"
   marker="$(cat "$(romm_marker_path)" 2>/dev/null)"
   [[ -n "$marker" ]] || { echo "没有 data_write 留下的标记"; return 1; }
   romm_login "$jar" >/dev/null || { rm -f "$jar"; echo "升级/重装后 OIDC 链走不通"; return 1; }
