@@ -37,7 +37,8 @@ romm_check_admin() { # <jar>：当前用户是主人管理员
 
 identity_check() {
   local jar page
-  jar="$(mktemp)"
+  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  jar="$(mktemp -u)"
   page="$(romm_login "$jar")" || { rm -f "$jar"; echo "OIDC 链失败：$(head -c 300 <<<"$page")"; return 1; }
   grep -qi '<title>RomM</title>' <<<"$page" || { rm -f "$jar"; echo "没有落回 RomM 页面：$(head -c 200 <<<"$page")"; return 1; }
   romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
@@ -53,7 +54,8 @@ scan_sees_gba() { # <jar>：/api/platforms 里有 gba 且 ROM 计数至少 1
 
 data_write() { # 用应用的上传接口收一个占位 ROM（服务端自己写进 games 共享文件夹），扫描入库，标记记下
   local jar marker csrf platforms pid up upload_id task task_id out tmp
-  jar="$(mktemp)"
+  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  jar="$(mktemp -u)"
   marker="$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   romm_login "$jar" >/dev/null || { rm -f "$jar"; echo "OIDC 链走不通"; return 1; }
   romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
