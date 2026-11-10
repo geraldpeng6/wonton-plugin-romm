@@ -105,6 +105,8 @@ x-wonton:
       登录用云吞的账号，打开就进库，不用再注册或设密码。
 
       封面和介绍等元数据依赖 IGDB 一类的外部服务，需要用户自己的 API 密钥；本版本不预填密钥，扫描和游玩不依赖元数据。
+
+      核心升级后，插件容器会按新的签发方自动重建，打开照常，不用重装。
     en: |
       Turn your game ROMs into a web library: scan, search, browse covers and descriptions, and play right in the browser (EmulatorJS, js-dos, Ruffle and more are built in). Saves and states follow your account.
 
@@ -113,6 +115,8 @@ x-wonton:
       Sign-in uses your Wonton account; the library opens straight away, with no second sign-up or password.
 
       Metadata (covers, descriptions) comes from external services such as IGDB and requires your own API keys. This release ships without keys; scanning and playing work without metadata.
+
+      After a core upgrade the plugin's containers are rebuilt with the new issuer automatically; pages open as before, with nothing to reinstall.
   release_notes: { zh: 第一个版本。, en: First release. }
   webui:
     service: romm

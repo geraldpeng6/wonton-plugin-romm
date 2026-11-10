@@ -10,6 +10,8 @@ RomM 是上游应用（[rommapp/romm](https://github.com/rommapp/romm)，AGPL-3.
 - 装插件时需要主人已填邮箱：RomM 首次 OIDC 登录要求 ID 令牌带 email。
 - 封面、介绍等元数据靠 IGDB、ScreenScraper 这类外部服务，要用户自己的 API 密钥。本插件不预填密钥（底座还没有让用户自填密钥的渠道），扫描和游玩不依赖元数据。
 
+核心升级时容器会按新的签发方自动重建，不用重装；账号按已有的身份记录认回原账号，数据不动。
+
 ## 图标
 
 `icon.svg` 是 RomM 的官方标志（isotipo），来源与商标说明见 [NOTICE](NOTICE)。
