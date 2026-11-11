@@ -122,14 +122,14 @@ rm_dd() { # 核心数据目录（e2e 冒烟有 read_env；dev.sh probes 用 prob
 rm_room_wait() { # <超时秒> <要找的文字>：等主人的「Wonton」私聊出现这段文字。用套件 probes.sh 的
 	# probes_owner_room_wait（随 main 的 kit 同步修），在独立进程里跑，套件的 pass/fail 不盖进冒烟自己的 shell。
 	# 确认码是应用生成的随机码，探针拿不到值，文字用插件前缀；冒烟里 extra_check 是唯一发信方，开始后出现即可认。
-	local core dd dir
+	local core dd pdir
 	core="$(rm_core)" || return 1
 	dd="$(rm_dd)"
-	dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	pdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 	# shellcheck disable=SC2016 # 单引号里是子进程 bash 的变量，$1/$2/$3 是 bash -c 的位置参数
 	env SMOKE_CORE="$core" SMOKE_DATA_DIR="$dd" SMOKE_OWNER="${SMOKE_OWNER:-owner}" \
 		bash -c 'source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
-		_ "$dir" "$1" "$2"
+		_ "$pdir" "$1" "$2"
 }
 
 extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻寄确认码邮件（只在发送成功时才建上），
