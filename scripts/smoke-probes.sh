@@ -133,11 +133,22 @@ rm_mailpit() { # <path>：调 Mailpit API（basic core:<密码>）。主路照�
 		"http://smtp.wonton.internal:8025$1" 2>&1
 }
 
-rm_mailpit_wait() { # <jq 过滤> [次数=20]：轮询 Mailpit 直到过滤命中
-	local filt="$1" n="${2:-20}" i out
+rm_mailpit_wait() { # <from> <to> [次数=20]：等一封 From/To 对上的信进 Mailpit
+	local from="$1" to="$2" n="${3:-20}" i out
 	for ((i = 0; i < n; i++)); do
 		out="$(rm_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
-		jq -e "$filt" <<<"$out" >/dev/null 2>&1 && return 0
+		jq -e --arg f "$from" --arg t "$to" \
+			'.messages | any(.From.Address == $f and any(.To[]; .Address == $t))' <<<"$out" >/dev/null 2>&1 && return 0
+		sleep 3
+	done
+	return 1
+}
+
+rm_mailpit_wait_gone() { # <to> [次数=20]：等收件人的信从 Mailpit 里消失（核心投进私聊后会把信删掉）
+	local to="$1" n="${2:-20}" i out
+	for ((i = 0; i < n; i++)); do
+		out="$(rm_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
+		jq -e --arg t "$to" '(.messages | map(select(.To[].Address == $t)) | length) == 0' <<<"$out" >/dev/null 2>&1 && return 0
 		sleep 3
 	done
 	return 1
@@ -159,14 +170,12 @@ extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻�
 	[[ -n "$id" ]] || { rm -f "$jar"; echo "建渠道响应没有 id：$(head -c 200 <<<"$resp")"; return 1; }
 	jq -e '.confirmed == false' <<<"$resp" >/dev/null || { rm -f "$jar"; echo "渠道不该是已确认的：$resp"; return 1; }
 	# 信进内部邮箱：From 是 WONTON_MAIL_FROM（app.romm.romm@plugins.wonton.internal）。
-	rm_mailpit_wait "$(jq -n --arg to "$to" \
-		'.messages | any(.From.Address == "app.romm.romm@plugins.wonton.internal" and any(.To[].Address == $to))')" 20 ||
+	rm_mailpit_wait "app.romm.romm@plugins.wonton.internal" "$to" 20 ||
 		{ dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null 2>&1; rm -f "$jar"
 			echo "确认码邮件 60 秒没进 Mailpit：$(rm_mailpit '/api/v1/messages?limit=5' | head -c 300)"; return 1; }
 	echo "确认码邮件已进内部邮箱（To=$to）"
 	# 核心投进收件人私聊后把信从 Mailpit 删掉：信箱里没有这封信 = 已投递。
-	rm_mailpit_wait "$(jq -n --arg to "$to" \
-		'(.messages | map(select(.To[].Address == $to)) | length) == 0')" 20 ||
+	rm_mailpit_wait_gone "$to" 20 ||
 		{ echo "确认码邮件一直留在 Mailpit：核心没把它投进主人私聊（投完才会删）"; rm -f "$jar"; return 1; }
 	dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null ||
 		echo "（提示）测试渠道 $id 删不掉，留在实例里"
