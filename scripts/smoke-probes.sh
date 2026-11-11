@@ -109,3 +109,67 @@ data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重
   scan_sees_gba "$jar" || { rm -f "$jar"; return 1; }
   rm -f "$jar"
 }
+
+# ---------- 发信（notify，规范 0.11）----------
+rm_core() { # 核心容器：Mailpit 的别名和 API 密码都在它的网络上/数据目录里
+	docker ps --format '{{.Names}}' | grep -xE "wonton-${SMOKE_INSTANCE:-}--core" | head -1
+}
+
+rm_mailpit() { # <path>：调 Mailpit API（basic core:<密码>）。主路照核心自己的冒烟：在核心网络里
+	# 打 mailpit.wonton.internal:8025；兜底用应用容器的 wget（它的网络里也有这个别名）。
+	local core pw dd out webc
+	core="$(rm_core)" || return 1
+	if declare -F read_env >/dev/null; then dd="$(read_env WONTON_DATA_DIR)"; else dd="$(probes_setting WONTON_DATA_DIR)"; fi
+	pw="$(docker exec "$core" cat "$dd/core/mailpit/api-password" 2>/dev/null)"
+	[[ -n "${pw:-}" ]] || { echo "读不到 Mailpit API 密码（核心数据目录 core/mailpit/api-password）"; return 1; }
+	out="$(docker run --rm --network "container:$core" curlimages/curl:8.23.0 \
+		-s -u "core:$pw" "http://mailpit.wonton.internal:8025$1" 2>&1)"
+	if jq -e '.messages' <<<"$out" >/dev/null 2>&1 || [[ "$out" == "{"* ]]; then
+		printf '%s' "$out"; return 0
+	fi
+	webc="$(docker ps --format '{{.Names}}' | grep "$SMOKE_INSTANCE" | grep 'romm' | head -1)"
+	[[ -n "$webc" ]] || { echo "Mailpit 主路没拿到 JSON：$(head -c 200 <<<"$out")"; return 1; }
+	docker exec "$webc" wget -qO- --header "Authorization: Basic $(printf 'core:%s' "$pw" | base64 | tr -d '\n')" \
+		"http://smtp.wonton.internal:8025$1" 2>&1
+}
+
+rm_mailpit_wait() { # <jq 过滤> [次数=20]：轮询 Mailpit 直到过滤命中
+	local filt="$1" n="${2:-20}" i out
+	for ((i = 0; i < n; i++)); do
+		out="$(rm_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
+		jq -e "$filt" <<<"$out" >/dev/null 2>&1 && return 0
+		sleep 3
+	done
+	return 1
+}
+
+extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻寄确认码邮件（只在发送成功时才建上），
+	# 核心投进主人私聊后从 Mailpit 取走删除；收完把渠道删掉，不给实例留未确认的渠道
+	local jar csrf resp id to
+	to="${SMOKE_OWNER:-owner}@wonton.internal"
+	jar="$(mktemp -u)"
+	page="$(romm_login "$jar")" || { rm -f "$jar"; echo "OIDC 链失败：$(head -c 300 <<<"$page")"; return 1; }
+	romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
+	csrf="$(romm_csrf "$jar")"
+	[[ -n "$csrf" ]] || { rm -f "$jar"; echo "会话里没有 romm_csrftoken"; return 1; }
+	resp="$(dweb --jar "$jar" /api/notification-channels -H "x-csrftoken: $csrf" -H 'Content-Type: application/json' \
+		-X POST -d "{\"type\":\"email\",\"name\":\"wonton-smoke-$(date +%s)\",\"address\":\"$to\"}")" ||
+		{ rm -f "$jar"; echo "建 Email 渠道失败：$(head -c 200 <<<"$resp")"; return 1; }
+	id="$(jq -r '.id // empty' <<<"$resp")"
+	[[ -n "$id" ]] || { rm -f "$jar"; echo "建渠道响应没有 id：$(head -c 200 <<<"$resp")"; return 1; }
+	jq -e '.confirmed == false' <<<"$resp" >/dev/null || { rm -f "$jar"; echo "渠道不该是已确认的：$resp"; return 1; }
+	# 信进内部邮箱：From 是 WONTON_MAIL_FROM（app.romm.romm@plugins.wonton.internal）。
+	rm_mailpit_wait "$(jq -n --arg to "$to" \
+		'.messages | any(.From.Address == "app.romm.romm@plugins.wonton.internal" and any(.To[].Address == $to))')" 20 ||
+		{ dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null 2>&1; rm -f "$jar"
+			echo "确认码邮件 60 秒没进 Mailpit：$(rm_mailpit '/api/v1/messages?limit=5' | head -c 300)"; return 1; }
+	echo "确认码邮件已进内部邮箱（To=$to）"
+	# 核心投进收件人私聊后把信从 Mailpit 删掉：信箱里没有这封信 = 已投递。
+	rm_mailpit_wait "$(jq -n --arg to "$to" \
+		'(.messages | map(select(.To[].Address == $to)) | length) == 0')" 20 ||
+		{ echo "确认码邮件一直留在 Mailpit：核心没把它投进主人私聊（投完才会删）"; rm -f "$jar"; return 1; }
+	dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null ||
+		echo "（提示）测试渠道 $id 删不掉，留在实例里"
+	rm -f "$jar"
+	echo "核心已把信投进主人的 Wonton 私聊（Mailpit 里已删除）"
+}
