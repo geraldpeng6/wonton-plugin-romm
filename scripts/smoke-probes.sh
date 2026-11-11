@@ -111,51 +111,55 @@ data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重
 }
 
 # ---------- 发信（notify，规范 0.11）----------
-rm_core() { # 核心容器：Mailpit 的别名和 API 密码都在它的网络上/数据目录里
+rm_core() { # 核心容器：通知房记录、Matrix 令牌和 Tuwunel 都在它的数据目录/网络上
 	docker ps --format '{{.Names}}' | grep -xE "wonton-${SMOKE_INSTANCE:-}--core" | head -1
 }
 
-rm_mailpit() { # <path>：调 Mailpit API（basic core:<密码>）。主路照核心自己的冒烟：在核心网络里
-	# 打 mailpit.wonton.internal:8025；兜底用应用容器的 wget（它的网络里也有这个别名）。
-	local core pw dd out webc
+rm_dd() { # 核心数据目录（e2e 冒烟有 read_env；dev.sh probes 用 probes_setting）
+	if declare -F read_env >/dev/null; then read_env WONTON_DATA_DIR; else probes_setting WONTON_DATA_DIR; fi
+}
+
+rm_room_query() { # 用主人令牌读「Wonton」通知房最近消息（信被核心投进私聊的最终证据）。
+	# 主人令牌照核心自己的做法：管理令牌走 Tuwunel 的 impersonation 登录；都在核心容器里拿。
+	local core dd room admin srv otok
 	core="$(rm_core)" || return 1
-	if declare -F read_env >/dev/null; then dd="$(read_env WONTON_DATA_DIR)"; else dd="$(probes_setting WONTON_DATA_DIR)"; fi
-	pw="$(docker exec "$core" cat "$dd/core/mailpit/api-password" 2>/dev/null)"
-	[[ -n "${pw:-}" ]] || { echo "读不到 Mailpit API 密码（核心数据目录 core/mailpit/api-password）"; return 1; }
-	out="$(docker run --rm --network "container:$core" curlimages/curl:8.23.0 \
-		-s -u "core:$pw" "http://mailpit.wonton.internal:8025$1" 2>&1)"
-	if jq -e '.messages' <<<"$out" >/dev/null 2>&1 || [[ "$out" == "{"* ]]; then
-		printf '%s' "$out"; return 0
-	fi
-	webc="$(docker ps --format '{{.Names}}' | grep "$SMOKE_INSTANCE" | grep 'romm' | head -1)"
-	[[ -n "$webc" ]] || { echo "Mailpit 主路没拿到 JSON：$(head -c 200 <<<"$out")"; return 1; }
-	docker exec "$webc" wget -qO- --header "Authorization: Basic $(printf 'core:%s' "$pw" | base64 | tr -d '\n')" \
-		"http://smtp.wonton.internal:8025$1" 2>&1
+	dd="$(rm_dd)"
+	room="$(docker exec "$core" cat "$dd/core/matrix-notice-room")" ||
+		{ echo "读不到通知房记录（$dd/core/matrix-notice-room）"; return 1; }
+	admin="$(docker exec "$core" cat "$dd/core/matrix-admin-token")" ||
+		{ echo "读不到 Matrix 管理令牌"; return 1; }
+	srv="$(docker exec "$core" cat "$dd/../secrets/matrix-server-name")" ||
+		{ echo "读不到 Matrix 服务器名"; return 1; }
+	otok="$(docker run --rm --network "container:$core" -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= -e NO_PROXY='*' \
+		curlimages/curl:8.23.0 -sS -H "Authorization: Bearer $admin" -H 'Content-Type: application/json' -d '{}' \
+		"http://tuwunel.wonton.internal:8008/_synapse/admin/v1/users/@owner:$srv/login" | jq -er .access_token)" ||
+		{ echo "拿不到主人的 Matrix 令牌"; return 1; }
+	docker run --rm --network "container:$core" -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= -e NO_PROXY='*' \
+		curlimages/curl:8.23.0 -sS -H "Authorization: Bearer $otok" \
+		"http://tuwunel.wonton.internal:8008/_matrix/client/v3/rooms/$room/messages?dir=b&limit=20"
 }
 
-rm_mailpit_wait() { # <from> <to> [次数=20]：等一封 From/To 对上的信进 Mailpit
-	local from="$1" to="$2" n="${3:-20}" i out
-	for ((i = 0; i < n; i++)); do
-		out="$(rm_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
-		jq -e --arg f "$from" --arg t "$to" \
-			'.messages | any(.From.Address == $f and any(.To[]; .Address == $t))' <<<"$out" >/dev/null 2>&1 && return 0
-		sleep 3
-	done
-	return 1
+rm_room_newest_ts() { # <前缀>：通知房里该插件最近一条邮件消息的 origin_server_ts（没有则 0）
+	local out
+	out="$(rm_room_query)" || { echo 0; return 0; }
+	jq -r --arg p "$1" '[.chunk[]? | select(.type == "m.room.message" and (.content.body | startswith($p))) | .origin_server_ts] | max // 0' <<<"$out" 2>/dev/null || echo 0
 }
 
-rm_mailpit_wait_gone() { # <to> [次数=20]：等收件人的信从 Mailpit 里消失（核心投进私聊后会把信删掉）
-	local to="$1" n="${2:-20}" i out
+rm_room_wait() { # <前缀> <标记> <起始 ts> [次数=40]：等通知房里出现这条插件发的新邮件消息（投进私聊后一直都在）
+	local prefix="$1" marker="$2" since="$3" n="${4:-40}" i out hits
 	for ((i = 0; i < n; i++)); do
-		out="$(rm_mailpit "/api/v1/messages?limit=100")" || { sleep 3; continue; }
-		jq -e --arg t "$to" '(.messages | map(select(.To[].Address == $t)) | length) == 0' <<<"$out" >/dev/null 2>&1 && return 0
-		sleep 3
+		out="$(rm_room_query)" || { sleep 2; continue; }
+		hits="$(jq -r --arg p "$prefix" --arg m "$marker" --argjson s "$since" '
+			[.chunk[]? | select(.type == "m.room.message" and (.content.body | startswith($p)) and .origin_server_ts > $s)
+			 | select($m == "" or (.content.body | contains($m)))] | length' <<<"$out" 2>/dev/null || echo 0)"
+		[[ "${hits:-0}" -ge 1 ]] && return 0
+		sleep 2
 	done
 	return 1
 }
 
 extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻寄确认码邮件（只在发送成功时才建上），
-	# 核心投进主人私聊后从 Mailpit 取走删除；收完把渠道删掉，不给实例留未确认的渠道
+	# 核心把它投进主人的「Wonton」私聊（直接读通知房的消息）；收完把渠道删掉，不给实例留未确认的渠道
 	local jar csrf resp id to
 	to="${SMOKE_OWNER:-owner}@wonton.internal"
 	jar="$(mktemp -u)"
@@ -163,22 +167,21 @@ extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻�
 	romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
 	csrf="$(romm_csrf "$jar")"
 	[[ -n "$csrf" ]] || { rm -f "$jar"; echo "会话里没有 romm_csrftoken"; return 1; }
+	# 记下触发前该插件最近一封邮件消息的时间，之后只认更新的。
+	before="$(rm_room_newest_ts "RomM：")"
+	# 建渠道：应用寄出确认码邮件（发送成功才建得上渠道，本身就是一次真实发信）。
 	resp="$(dweb --jar "$jar" /api/notification-channels -H "x-csrftoken: $csrf" -H 'Content-Type: application/json' \
 		-X POST -d "{\"type\":\"email\",\"name\":\"wonton-smoke-$(date +%s)\",\"address\":\"$to\"}")" ||
 		{ rm -f "$jar"; echo "建 Email 渠道失败：$(head -c 200 <<<"$resp")"; return 1; }
 	id="$(jq -r '.id // empty' <<<"$resp")"
 	[[ -n "$id" ]] || { rm -f "$jar"; echo "建渠道响应没有 id：$(head -c 200 <<<"$resp")"; return 1; }
 	jq -e '.confirmed == false' <<<"$resp" >/dev/null || { rm -f "$jar"; echo "渠道不该是已确认的：$resp"; return 1; }
-	# 信进内部邮箱：From 是 WONTON_MAIL_FROM（app.romm.romm@plugins.wonton.internal）。
-	rm_mailpit_wait "app.romm.romm@plugins.wonton.internal" "$to" 20 ||
+	# 核心把信投进主人的「Wonton」私聊：房里出现这一封。
+	rm_room_wait "RomM：" "" "$before" 40 ||
 		{ dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null 2>&1; rm -f "$jar"
-			echo "确认码邮件 60 秒没进 Mailpit：$(rm_mailpit '/api/v1/messages?limit=5' | head -c 300)"; return 1; }
-	echo "确认码邮件已进内部邮箱（To=$to）"
-	# 核心投进收件人私聊后把信从 Mailpit 删掉：信箱里没有这封信 = 已投递。
-	rm_mailpit_wait_gone "$to" 20 ||
-		{ echo "确认码邮件一直留在 Mailpit：核心没把它投进主人私聊（投完才会删）"; rm -f "$jar"; return 1; }
+			echo "确认码邮件 80 秒没出现在主人的 Wonton 私聊：$(rm_room_query | head -c 300)"; return 1; }
 	dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null ||
 		echo "（提示）测试渠道 $id 删不掉，留在实例里"
 	rm -f "$jar"
-	echo "核心已把信投进主人的 Wonton 私聊（Mailpit 里已删除）"
+	echo "确认码邮件已进主人的 Wonton 私聊（RomM：…，收件人 $to）"
 }
