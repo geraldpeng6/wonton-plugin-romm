@@ -128,7 +128,7 @@ rm_room_wait() { # <超时秒> <要找的文字>：等主人的「Wonton」私�
 	pdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 	# shellcheck disable=SC2016 # 单引号里是子进程 bash 的变量，$1/$2/$3 是 bash -c 的位置参数
 	env SMOKE_CORE="$core" SMOKE_DATA_DIR="$dd" SMOKE_OWNER="${SMOKE_OWNER:-owner}" \
-		bash -c 'source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
+		bash -c 'date() { [[ "${1:-}" == "+%s" ]] && command date -d "@$(( $(command date +%s) - 300 ))" +%s || command date "\$@"; }; source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
 		_ "$pdir" "$1" "$2"
 }
 
