@@ -4,7 +4,7 @@
 # 提供方是 http，RomM 对此没有强制（源码和它自己的测试都用 http 的 issuer，docs 里
 # "HTTPS is required" 指的是第三方 IdP 常见要求）。DISABLE_SETUP_WIZARD 关掉首次的本地
 # 管理员向导，groups 声明把主人（["owner"]）映射成 RomM 管理员，打开网页就进应用。
-# RomM 首次登录要求 ID 令牌里有 email，主人没填邮箱装不上（${WONTON_OWNER_EMAIL:?}）。
+# RomM 首次登录要求 ID 令牌里有 email（缺了直接 400）：云吞的 email 声明是用户的内部邮箱，恒有值。
 #
 # Redis 用镜像内置的 valkey（上游文档的默认做法）：不设 REDIS_HOST 时由入口脚本自己拉起，
 # 数据落在挂载的 /redis-data。元数据提供方（IGDB 等）要用户自己的密钥，底座还没有让用户
@@ -41,8 +41,15 @@ services:
       OIDC_ROLE_VIEWER: owner
       # 首次打开跳过本地管理员向导，直接由 OIDC 建号（账号是主人自己，角色是管理员）。
       DISABLE_SETUP_WIZARD: "true"
-      # RomM 首次 OIDC 登录硬性要求 email 声明（源码里缺了直接 400）。
-      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?需要用户邮箱}
+      # 网页对外地址：重置链接和通知里的链接用它拼；不给的话（默认 http://0.0.0.0，不是可分享的
+      # 地址）RomM 不发重置邮件，只把链接写进日志。
+      ROMM_BASE_URL: ${WONTON_APP_URL}
+      # 发信走核心的内部邮箱：不认证、不加密，信转进收件人的 Wonton 私聊。
+      SMTP_HOST: ${WONTON_SMTP_HOST}
+      SMTP_PORT: ${WONTON_SMTP_PORT}
+      SMTP_FROM: ${WONTON_MAIL_FROM}
+      # 核心不宣告 STARTTLS，明文直连；不填用户名密码，RomM 就跳过 login。
+      SMTP_SECURITY: none
     volumes:
       # 游戏库：共享文件夹按平台子文件夹组织（如 games/gba/）；RomM 在这里建目录和收上传。
       - ${WONTON_SHARE_GAMES}:/romm/library
@@ -79,9 +86,9 @@ services:
       start_interval: 5s
 
 x-wonton:
-  spec: "0.6"
+  spec: "0.11"
   id: app.romm.romm
-  version: 0.1.0
+  version: 0.2.0
   kind: app
   title: { en: RomM }
   description:
@@ -104,6 +111,8 @@ x-wonton:
 
       登录用云吞的账号，打开就进库，不用再注册或设密码。
 
+      应用发的信（密码重置、通知确认码）会出现在你的 Wonton 私聊里；通知渠道填云吞以外的邮箱收不到，RomM 会报发送失败。
+
       封面和介绍等元数据依赖 IGDB 一类的外部服务，需要用户自己的 API 密钥；本版本不预填密钥，扫描和游玩不依赖元数据。
 
       核心升级后，插件容器会按新的签发方自动重建，打开照常，不用重装。
@@ -114,10 +123,14 @@ x-wonton:
 
       Sign-in uses your Wonton account; the library opens straight away, with no second sign-up or password.
 
+      Emails the app sends (password resets, notification codes) show up in your Wonton private chat; notification channels pointed at addresses outside Wonton won't be delivered — RomM reports the failure.
+
       Metadata (covers, descriptions) comes from external services such as IGDB and requires your own API keys. This release ships without keys; scanning and playing work without metadata.
 
       After a core upgrade the plugin's containers are rebuilt with the new issuer automatically; pages open as before, with nothing to reinstall.
-  release_notes: { zh: 第一个版本。, en: First release. }
+  release_notes:
+    zh: 应用发的信（密码重置、通知确认码）走云吞的内部邮箱，出现在你的 Wonton 私聊里。
+    en: Emails the app sends (password resets, notification codes) go through Wonton's internal mailbox and land in your Wonton private chat.
   webui:
     service: romm
     port: 8080
@@ -136,8 +149,8 @@ x-wonton:
     - network.egress
     # RomM 在 games 共享文件夹里建平台目录、收网页上传。
     - storage.share.games:write
-    # 注入主人的邮箱：RomM 的 OIDC 登录要求 ID 令牌带 email。
-    - owner.identity
+    # 应用发的信（密码重置、通知确认码）经核心的内部邮箱投递，落进收件人的 Wonton 私聊。
+    - notify
   # 上游没写最低内存。单容器实测（5.4.1，空库扫描后空闲）：romm 约 654M + mariadb 约 42M，取 1G。镜像有 amd64 和 arm64。
   requirements:
     arch: [amd64, arm64]

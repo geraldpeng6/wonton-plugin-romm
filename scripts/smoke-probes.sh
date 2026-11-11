@@ -109,3 +109,57 @@ data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重
   scan_sees_gba "$jar" || { rm -f "$jar"; return 1; }
   rm -f "$jar"
 }
+
+# ---------- 发信（notify，规范 0.11）----------
+rm_core() { # 核心容器：通知房记录、Matrix 令牌和 Tuwunel 都在它的数据目录/网络上
+	docker ps --format '{{.Names}}' | grep -xE "wonton-${SMOKE_INSTANCE:-}--core" | head -1
+}
+
+rm_dd() { # 核心数据目录（e2e 冒烟有 read_env；dev.sh probes 用 probes_setting）
+	if declare -F read_env >/dev/null; then read_env WONTON_DATA_DIR; else probes_setting WONTON_DATA_DIR; fi
+}
+
+rm_room_wait() { # <超时秒> <要找的文字>：等主人的「Wonton」私聊出现这段文字。用套件 probes.sh 的
+	# probes_owner_room_wait（随 main 的 kit 同步修），在独立进程里跑，套件的 pass/fail 不盖进冒烟自己的 shell。
+	# 确认码是应用生成的随机码，探针拿不到值，文字用插件前缀；冒烟里 extra_check 是唯一发信方，开始后出现即可认。
+	local core dd pdir
+	core="$(rm_core)" || return 1
+	dd="$(rm_dd)"
+	pdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	# shellcheck disable=SC2016 # 单引号里是子进程 bash 的变量，$1/$2/$3 是 bash -c 的位置参数
+	env SMOKE_CORE="$core" SMOKE_DATA_DIR="$dd" SMOKE_OWNER="${SMOKE_OWNER:-owner}" \
+		bash -c 'source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
+		_ "$pdir" "$1" "$2"
+}
+
+extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻寄确认码邮件（只在发送成功时才建上），
+	# 核心把它投进主人的「Wonton」私聊（直接读通知房的消息）；收完把渠道删掉，不给实例留未确认的渠道
+	local jar csrf resp id to wp
+	to="${SMOKE_OWNER:-owner}@wonton.internal"
+	jar="$(mktemp -u)"
+	page="$(romm_login "$jar")" || { rm -f "$jar"; echo "OIDC 链失败：$(head -c 300 <<<"$page")"; return 1; }
+	romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
+	csrf="$(romm_csrf "$jar")"
+	[[ -n "$csrf" ]] || { rm -f "$jar"; echo "会话里没有 romm_csrftoken"; return 1; }
+	# 等待先挂后台再触发（模板的用法）：信进私聊是秒级投递，先等后发才等得到。
+	rm_room_wait 120 "RomM：" & wp=$!
+	# 建渠道：应用寄出确认码邮件（发送成功才建得上渠道，本身就是一次真实发信）。
+	resp="$(dweb --jar "$jar" /api/notification-channels -H "x-csrftoken: $csrf" -H 'Content-Type: application/json' \
+		-X POST -d "{\"type\":\"email\",\"name\":\"wonton-smoke-$(date +%s)\",\"address\":\"$to\"}")" ||
+		{ kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null; rm -f "$jar"; echo "建 Email 渠道失败：$(head -c 200 <<<"$resp")"; return 1; }
+	id="$(jq -r '.id // empty' <<<"$resp")"
+	if [[ -z "$id" || "$(jq -r '.confirmed // true' <<<"$resp")" != false ]]; then
+		kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
+		{ [[ -z "$id" ]] && echo "建渠道响应没有 id：$(head -c 200 <<<"$resp")"; } ||
+			{ echo "渠道不该是已确认的：$resp"; return 1; }
+		return 1
+	fi
+	# 核心把信投进主人的「Wonton」私聊：房里出现这一封。
+	wait "$wp" ||
+		{ dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null 2>&1; rm -f "$jar"
+			echo "确认码邮件 120 秒没出现在主人的 Wonton 私聊（房里没这封信）"; return 1; }
+	dweb --jar "$jar" "/api/notification-channels/$id" -H "x-csrftoken: $csrf" -X DELETE >/dev/null ||
+		echo "（提示）测试渠道 $id 删不掉，留在实例里"
+	rm -f "$jar"
+	echo "确认码邮件已进主人的 Wonton 私聊（RomM：…，收件人 $to）"
+}
