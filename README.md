@@ -25,4 +25,4 @@ scripts/dev.sh probes         # 跑插件探针
 scripts/dev.sh smoke          # 端到端冒烟
 ```
 
-流程见[插件开发指南](https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md)，规则见[插件规范](https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md)。
+流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)，规则见[插件规范](https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md)。
