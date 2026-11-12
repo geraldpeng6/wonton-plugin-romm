@@ -1,7 +1,6 @@
 # shellcheck shell=bash disable=SC2034
 # scripts/smoke.sh / dev.sh probes 的一项一项探测，跟着插件走。
-# 钩子只用约定面：SMOKE_STATE（数据标记）、SMOKE_OWNER 和助手 web_get / dweb；
-# 会话 jar 由钩子自己 mktemp 持有（dweb --jar），不依赖调用方导出的 jar 变量。
+# OIDC 会话 jar 由探针自己 mktemp 持有（dweb --jar），不占用套件的 SMOKE_JAR。
 #
 # 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
 # 身份：identity_check 走完 OIDC 链后用应用自己的“当前用户”接口断言认出的是主人管理员。
@@ -13,14 +12,6 @@ web_assert() { grep -qi '<title>RomM</title>'; }
 romm_login() { # <jar>：走完浏览器式 OIDC（/api/login/openid → 核心身份提供方自动登录 →
   #            回调 /api/oauth/openid 由 RomM 换令牌），RomM 会话落在指定 jar 里
   dweb --jar "$1" /api/login/openid -L
-}
-
-romm_marker_path() { # SMOKE_STATE 在 e2e 是标记文件，在 dev probes 是状态目录——两种都接住
-  if [[ -f "$SMOKE_STATE" ]]; then
-    printf '%s' "$SMOKE_STATE"
-  else
-    printf '%s' "$SMOKE_STATE/romm-data-marker"
-  fi
 }
 
 romm_csrf() { # <jar>：RomM 的 CSRF 中间件校验所有写请求，令牌在 heartbeat 写进会话 cookie
@@ -37,7 +28,7 @@ romm_check_admin() { # <jar>：当前用户是主人管理员
 
 identity_check() {
   local jar page
-  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  # mktemp -u：只取名字不建文件——dweb 的会话引导见 jar 文件已存在会跳过核心登录，网关就 401 了
   jar="$(mktemp -u)"
   page="$(romm_login "$jar")" || { rm -f "$jar"; echo "OIDC 链失败：$(head -c 300 <<<"$page")"; return 1; }
   grep -qi '<title>RomM</title>' <<<"$page" || { rm -f "$jar"; echo "没有落回 RomM 页面：$(head -c 200 <<<"$page")"; return 1; }
@@ -54,7 +45,7 @@ scan_sees_gba() { # <jar>：/api/platforms 里有 gba 且 ROM 计数至少 1
 
 data_write() { # 用应用的上传接口收一个占位 ROM（服务端自己写进 games 共享文件夹），扫描入库，标记记下
   local jar marker csrf platforms pid up upload_id task task_id out tmp
-  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  # mktemp -u：只取名字不建文件——dweb 的会话引导见 jar 文件已存在会跳过核心登录，网关就 401 了
   jar="$(mktemp -u)"
   marker="$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   romm_login "$jar" >/dev/null || { rm -f "$jar"; echo "OIDC 链走不通"; return 1; }
@@ -95,14 +86,14 @@ data_write() { # 用应用的上传接口收一个占位 ROM（服务端自己�
   done
   scan_sees_gba "$jar" || { rm -f "$jar"; return 1; }
   rm -f "$jar"
-  printf '%s' "$marker" >"$(romm_marker_path)"
+  printf '%s' "$marker" >"$SMOKE_STATE"
 }
 
 data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重扫）
   local jar marker
-  # mktemp -u：只取名字不建文件——session_into 见 jar 文件已存在会跳过核心登录（dev.sh:505），网关就 401 了
+  # mktemp -u：只取名字不建文件——dweb 的会话引导见 jar 文件已存在会跳过核心登录，网关就 401 了
   jar="$(mktemp -u)"
-  marker="$(cat "$(romm_marker_path)" 2>/dev/null)"
+  marker="$(cat "$SMOKE_STATE" 2>/dev/null)"
   [[ -n "$marker" ]] || { echo "没有 data_write 留下的标记"; return 1; }
   romm_login "$jar" >/dev/null || { rm -f "$jar"; echo "升级/重装后 OIDC 链走不通"; return 1; }
   romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
@@ -111,44 +102,27 @@ data_check() { # 升级/重装后：库里扫出的平台和 ROM 还在（不重
 }
 
 # ---------- 发信（notify，规范 0.11）----------
-rm_core() { # 核心容器：通知房记录、Matrix 令牌和 Tuwunel 都在它的数据目录/网络上
-	docker ps --format '{{.Names}}' | grep -xE "wonton-${SMOKE_INSTANCE:-}--core" | head -1
-}
-
-rm_dd() { # 核心数据目录（e2e 冒烟有 read_env；dev.sh probes 用 probes_setting）
-	if declare -F read_env >/dev/null; then read_env WONTON_DATA_DIR; else probes_setting WONTON_DATA_DIR; fi
-}
-
-rm_room_wait() { # <超时秒> <要找的文字>：等主人的「Wonton」私聊出现这段文字。用套件 probes.sh 的
-	# probes_owner_room_wait（随 main 的 kit 同步修），在独立进程里跑，套件的 pass/fail 不盖进冒烟自己的 shell。
-	# 确认码是应用生成的随机码，探针拿不到值，文字用插件前缀；冒烟里 extra_check 是唯一发信方，开始后出现即可认。
-	local core dd pdir
-	core="$(rm_core)" || return 1
-	dd="$(rm_dd)"
-	pdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-	# shellcheck disable=SC2016 # 单引号里是子进程 bash 的变量，$1/$2/$3 是 bash -c 的位置参数
-	env SMOKE_CORE="$core" SMOKE_DATA_DIR="$dd" SMOKE_OWNER="${SMOKE_OWNER:-owner}" \
-		bash -c 'date() { [[ "${1:-}" == "+%s" ]] && command date -d "@$(( $(command date +%s) - 300 ))" +%s || command date "\$@"; }; source "$1/lib.sh" && source "$1/probes.sh" && probes_owner_room_wait "$2" "$3"' \
-		_ "$pdir" "$1" "$2"
-}
-
 extra_check() { # 发信端到端：建一个 Email 通知渠道，应用立刻寄确认码邮件（只在发送成功时才建上），
 	# 核心把它投进主人的「Wonton」私聊（直接读通知房的消息）；收完把渠道删掉，不给实例留未确认的渠道
-	local jar csrf resp id to wp
-	to="${SMOKE_OWNER:-owner}@wonton.internal"
+	local jar csrf resp id to wp page
+	to="${SMOKE_OWNER}@wonton.internal"
 	jar="$(mktemp -u)"
 	page="$(romm_login "$jar")" || { rm -f "$jar"; echo "OIDC 链失败：$(head -c 300 <<<"$page")"; return 1; }
 	romm_check_admin "$jar" || { rm -f "$jar"; return 1; }
 	csrf="$(romm_csrf "$jar")"
 	[[ -n "$csrf" ]] || { rm -f "$jar"; echo "会话里没有 romm_csrftoken"; return 1; }
 	# 等待先挂后台再触发（模板的用法）：信进私聊是秒级投递，先等后发才等得到。
-	rm_room_wait 120 "RomM：" & wp=$!
+	# 确认码是应用生成的随机码，探针拿不到值，等应用自己的确认码邮件主题——投进私聊的信以清单
+	# 标题开头（改名会跟着变），主题才是稳定锚点。
+	probes_owner_room_wait 120 "Your RomM confirmation code" & wp=$!
 	# 建渠道：应用寄出确认码邮件（发送成功才建得上渠道，本身就是一次真实发信）。
 	resp="$(dweb --jar "$jar" /api/notification-channels -H "x-csrftoken: $csrf" -H 'Content-Type: application/json' \
 		-X POST -d "{\"type\":\"email\",\"name\":\"wonton-smoke-$(date +%s)\",\"address\":\"$to\"}")" ||
 		{ kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null; rm -f "$jar"; echo "建 Email 渠道失败：$(head -c 200 <<<"$resp")"; return 1; }
 	id="$(jq -r '.id // empty' <<<"$resp")"
-	if [[ -z "$id" || "$(jq -r '.confirmed // true' <<<"$resp")" != false ]]; then
+	# 渠道建上时必须是未确认的（确认码邮件还没走完）。不能用 jq 的 // 兜底判：
+	# false 和 null 都会被 // 当成“没有值”，未确认的渠道会被误判成已确认。
+	if [[ -z "$id" ]] || ! jq -e '.confirmed == false' <<<"$resp" >/dev/null; then
 		kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
 		{ [[ -z "$id" ]] && echo "建渠道响应没有 id：$(head -c 200 <<<"$resp")"; } ||
 			{ echo "渠道不该是已确认的：$resp"; return 1; }
