@@ -90,10 +90,10 @@ x-wonton:
   id: app.romm.romm
   version: 0.2.0
   kind: app
-  title: { en: RomM }
+  title: { zh: 复古游戏厅（RomM）, en: Retro Game Room (RomM) }
   description:
-    zh: 把游戏 ROM 整理成网页游戏库，在浏览器里直接玩
-    en: Organize your game ROMs into a web library and play them in the browser
+    zh: 像网页版的怀旧游戏机：把红白机、GBA 这些老游戏的文件放进去，点开就在浏览器里玩，存档跟着账号走。
+    en: "A retro console in your browser: add game files for the NES, Game Boy Advance and other classics, then play right in the browser with saves tied to your account."
   icon: icon.svg
   notices: [NOTICE]
   screenshots: [screenshots/library.png, screenshots/game.png, screenshots/search.png, screenshots/play.png]
@@ -105,7 +105,7 @@ x-wonton:
     en: [Games, Emulators, Retro games]
   about:
     zh: |
-      把游戏 ROM 整理成网页游戏库：扫描、检索、看封面和介绍，点开就在浏览器里玩（EmulatorJS、js-dos、Ruffle 等模拟器内置），存档和即时存档跟着账号走。
+      把老游戏的文件（ROM）整理成网页游戏库：扫描、搜索、看封面和介绍，点开就在浏览器里玩（游戏模拟器已内置），存档和即时存档跟着账号走。
 
       游戏文件放在共享文件夹 games 里，按上游 5.x 的库结构放 roms 子目录再按平台分（如 games/roms/gba/ 放 GBA 的 ROM，支持的平台见 RomM 文档）；也可以直接在网页里上传。
 
@@ -117,7 +117,7 @@ x-wonton:
 
       核心升级后，插件容器会按新的签发方自动重建，打开照常，不用重装。
     en: |
-      Turn your game ROMs into a web library: scan, search, browse covers and descriptions, and play right in the browser (EmulatorJS, js-dos, Ruffle and more are built in). Saves and states follow your account.
+      Turn your old game files (ROMs) into a web library: scan, search, browse covers and descriptions, and play right in the browser with emulators built in. Saves and save states follow your account.
 
       ROM files live in the games shared folder, in a roms folder grouped by platform (e.g. games/roms/gba/ for GBA; supported platforms are listed in the RomM docs). You can also upload from the web UI.
 
